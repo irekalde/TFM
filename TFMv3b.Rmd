@@ -1,0 +1,537 @@
+---
+title: "Cálculo de vida útil restante en maquinaria mediante técnicas de Inteligencia Artificial Parte 2"
+output: html_notebook
+---
+Autor: Iñigo Rekalde
+Fecha: 28-02-2019
+
+Preparación del entorno
+```{r}
+# Fijar el directorio de trabajo
+setwd("~/Personal/Master/TFM/R/Def")
+
+# Instalar las librerias si no están instaladas
+# install.packages("paquete")
+# Cargar librerias
+library(dplyr)
+library(zoo)
+library(ggplot2)
+library(reshape2)
+library(caret)
+```
+
+
+Preparación para importar
+```{r}
+# Los datos a importar no contienen cabeceras.
+# Se genera un vector con nombres de las columnas. Train y test comparten columnas.
+col_nombres <- c("unit_num","time_cycles","ope_set1","ope_set2","ope_set3",
+              "sen1","sen2","sen3","sen4","sen5","sen6","sen7","sen8","sen9","sen10",
+              "sen11","sen12","sen13","sen14","sen15","sen16","sen17","sen18","sen19","sen20","sen21")
+# Columna de RUL de test
+col_RUL <- c("RUL")
+
+# Para facilitar la importación se establecen los tipos de datos por columna.
+# Las dos primeras son enteros y las restantes son numericas para train y test
+col_tipos <- rep("integer", 2)
+col_tipos <- c(col_tipos, rep("numeric", 24))
+# RUL como númerica
+col_tipo_RUL <- c("numeric")
+```
+
+
+Importación de los ficheros:
+Datos juego 1 de entrenamiento, test y RUL verdadero Test
+```{r}
+# Se importa el fichero para entrenar los modelos en un data frame
+dftrain1 <- read.table("train_FD001.txt", col.names = col_nombres, colClasses = col_tipos)
+# Se importa el fichero para test o validación en un dataframe
+dftest1 <- read.table("test_FD001.txt", col.names = col_nombres, colClasses = col_tipos)
+# Se importa el fichero con el RUL de test o validación
+dfRUL1 <- read.table("RUL_FD001.txt", col.names = col_RUL, colClasses = col_tipo_RUL)
+```
+
+
+Generar medias y desviación estandar entrenamiento
+```{r}
+# Se agregan mas caracterisitcas para ampliar los datos de entrenamiento.
+# Por cada uno de las medidas de los 21 sensores se calculan:
+# med1 - med21: Media movil para un tamaño de ventana definida
+# sd1 - sd21: Desviación estandar para el tamaño de ventana definida
+
+# Tamaño de la ventana para calcular el numero de medidas con las que se calcula
+# la media y la desviación estandar
+ventana <- 5
+
+# Identificar las columnas iniciales que no son medidas de sensores
+columnas_inicio <- 5
+
+# Identificar la o las columnas finales que no son medidas de sensores
+columnas_fin <- 1
+
+# NUmero columnas total
+columnas_total <- ncol(dftrain1RUL)
+
+# cantidad de sensores
+cant_sensores <- columnas_total - columnas_inicio - columnas_fin
+
+# Generar los nombre de las columnas para las medias
+columnas_medias <- paste("med",(1:cant_sensores),sep="")
+
+# Generar los nombre de las columnas para las desviaciones estandares
+columnas_sd <- paste("sd",(1:cant_sensores),sep="")
+
+# Calcular numero de motores
+motores <- unique(dftrain1RUL[,1])
+num_motores <- length(motores)
+
+# Generar vector para la media movil
+media_movil <- c()
+
+# Generar vector para la desviacion estandar movil
+sd_movil <- c()
+
+
+# Bucle para cada motor
+for(i in 1:num_motores){
+  
+  # Sub conjunto de datos del motor que estemos analizando en cada ciclo del bucle
+  sensoresxmotor = subset(dftrain1RUL[,(columnas_inicio+1):(columnas_total-columnas_fin)],dftrain1RUL$unit_num==motores[i])
+  
+  # generar la media movil para todos los sensores
+  media_movil = rbind(media_movil,rollapply(sensoresxmotor,ventana,mean,align = "right",partial=1))
+  
+  # generar la desviación estandar movil para todos los sensores
+  sd_movil_i = rollapply(sensoresxmotor,ventana,sd,align = "right",partial=1)
+  sd_movil_i[is.na(sd_movil_i)]=0
+  sd_movil = rbind(sd_movil,sd_movil_i)
+  
+}
+
+# Convertir las matrices en dataframes
+df_media <- as.data.frame(media_movil)
+df_sd <- as.data.frame(sd_movil)
+
+# Cambiar los nombres de las columnas
+
+names(df_sd) <- columnas_sd
+names(df_media) <- columnas_medias
+
+# Generar el dataframe con los datos originales mas las que hemos generado.
+dftrain1med <- cbind(dftrain1RUL[,1:(columnas_inicio + cant_sensores)], df_media, df_sd)
+
+```
+
+
+Generar medias y desviación estandar test
+```{r}
+# Se agregan mas caracterisitcas para ampliar los datos de test.
+# Por cada uno de las medidas de los 21 sensores se calculan:
+# med1 - med21: Media movil para un tamaño de ventana definida
+# sd1 - sd21: Desviación estandar para el tamaño de ventana definida
+
+# Tamaño de la ventana para calcular el numero de medidas con las que se calcula
+# la media y la desviación estandar
+ventana <- 5
+
+# Identificar las columnas iniciales que no son medidas de sensores
+columnas_inicio <- 5
+
+# Identificar la o las columnas finales que no son medidas de sensores
+columnas_fin <- 0
+
+# NUmero columnas total
+columnas_total <- ncol(dftest1)
+
+# cantidad de sensores
+cant_sensores <- columnas_total - columnas_inicio - columnas_fin
+
+# Generar los nombre de las columnas para las medias
+columnas_medias <- paste("med",(1:cant_sensores),sep="")
+
+# Generar los nombre de las columnas para las desviaciones estandares
+columnas_sd <- paste("sd",(1:cant_sensores),sep="")
+
+# Calcular numero de motores
+motores <- unique(dftest1[,1])
+num_motores <- length(motores)
+
+# Generar vector para la media movil
+media_movil <- c()
+
+# Generar vector para la desviacion estandar movil
+sd_movil <- c()
+
+
+# Bucle para cada motor
+for(i in 1:num_motores){
+  
+  # Sub conjunto de datos del motor que estemos analizando en cada ciclo del bucle
+  sensoresxmotor = subset(dftest1[,(columnas_inicio+1):(columnas_total-columnas_fin)],dftest1$unit_num==motores[i])
+  
+  # generar la media movil para todos los sensores
+  media_movil = rbind(media_movil,rollapply(sensoresxmotor,ventana,mean,align = "right",partial=1))
+  
+  # generar la desviación estandar movil para todos los sensores
+  sd_movil_i = rollapply(sensoresxmotor,ventana,sd,align = "right",partial=1)
+  sd_movil_i[is.na(sd_movil_i)]=0
+  sd_movil = rbind(sd_movil,sd_movil_i)
+  
+}
+
+# Convertir las matrices en dataframes
+df_media <- as.data.frame(media_movil)
+df_sd <- as.data.frame(sd_movil)
+
+# Cambiar los nombres de las columnas
+
+names(df_sd) <- columnas_sd
+names(df_media) <- columnas_medias
+
+# Generar el dataframe con los datos originales mas las que hemos generado.
+dftest1med <- cbind(dftest1[,1:(columnas_inicio + cant_sensores)], df_media, df_sd)
+
+```
+
+
+Fichero de Test 1 solo quedarse con el último registro de cada motor
+```{r}
+dftest1medult <- merge(aggregate(time_cycles~unit_num, dftest1med,function(x) x[which.max(x)]),dftest1med)
+# Ordenarlo por número de motor
+dftest1medult <- dftest1medult[with(dftest1medult, order(unit_num)), ]
+```
+
+
+Normalizar Juegos de datos 1
+```{r}
+normalizardf1med <- preProcess(dftrain1med, method = "range", rangeBounds = c(0,1))
+# No variation for for: ope_set3, sen1, sen5, sen10, sen16, sen18, sen19, med1, med5, med10, med16, med18, med19, sd1, sd5, sd10, sd16, sd18, sd19
+dftrain1mednorm <- predict(normalizardf1med, dftrain1med)
+
+```
+
+Eliminar las variables que no varian en el fichero de entrenamiento
+```{r}
+dftrain1mednorvar <- dftrain1mednorm[ , -which(names(dftrain1mednorm) %in% c("ope_set3", "sen1", "sen5", "sen10", "sen16", "sen18", "sen19", "med1", "med5", "med10", "med16", "med18", "med19", "sd1", "sd5", "sd10", "sd16", "sd18", "sd19"))]
+
+```
+
+
+
+
+
+Normalizar el fichero Test
+```{r}
+dftest1medultnorm <- predict(normalizardf1med, dftest1medult)
+```
+
+
+Eliminar las variables que no varian en el fichero de Test
+```{r}
+dftest1medultnorvar <- dftest1medultnorm[ , -which(names(dftest1medultnorm) %in% c("ope_set3", "sen1", "sen5", "sen10", "sen16", "sen18", "sen19", "med1", "med5", "med10", "med16", "med18", "med19", "sd1", "sd5", "sd10", "sd16", "sd18", "sd19"))]
+```
+
+
+Agregar el Tiempo de vida Util al fichero de entrenamiento
+```{r}
+RUL <- dftrain1RUL$RUL
+dftrain1mednorvarRUL <- cbind(dftrain1mednorvar, RUL )
+```
+
+
+Prueba 01rfmed Random Forest Medias: 
+ - Datos normalizados.
+ - Eliminados datos que no varian.
+ - Juego de datos 1
+ - Random Forest
+ - Sensores, desviaciones y medias moviles
+ - 1 parametro.
+ - Metodo: oob
+ - Metrica RMSE
+ - Arboles: 8
+ 
+```{r}
+
+# Parametros de control 
+control01med <- trainControl(
+  method = "oob")
+
+# Valor para la semilla a la hora de generar numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# Entrenar el modelo
+modelo_rf01med = train(RUL ~ ., data=dftrain1mednorvarRUL,
+                          method='rf',
+                          preProcess=NULL,
+                          metric = "RMSE",
+                          replace = TRUE,
+                          tuneLength = 1,
+                          ntree = 8,
+                          importance=T,
+                          trControl = control01med)
+
+```
+
+
+Resultados entrenamiento:
+```{r}
+print(modelo_rf01med)
+```
+
+
+Muestra la importancia de las variables:
+```{r}
+varimp_rf01med <-varImp(modelo_rf01med)
+print(varimp_rf01med)
+```
+
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rf01med <- predict(modelo_rf01med, newdata = dftest1medultnorvar)
+```
+
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+
+prediccion_ord <- prediccion_rf01med[order(as.integer(names(prediccion_rf01med)))]
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+RMSE_test_rf01med <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rf01med)
+
+```
+
+
+
+
+
+
+Prueba (rn01med) Redes Neuronales Media: 
+ - Datos normalizados.
+ - Eliminados datos que no varian.
+ - Juego de datos 1
+ - Redes Neuronales (mxnet)
+ - Sensores, desviaciones y medias moviles.
+ - Parametros por defecto
+ - Metrica RMSE
+
+```{r}
+
+# Valor para la semilla a la hora de generar numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# Entrenar el modelo
+modelo_rn01med <- train(
+  x = dftrain1mednorvar, 
+  y = dftrain1RUL$RUL, 
+  method = "mxnet", 
+  preProc =  NULL
+  )
+
+```
+
+
+Resultados entrenamiento:
+```{r}
+print(modelo_rn01med)
+```
+
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rn01med <- predict(modelo_rn01med, newdata = dftest1medultnorvar)
+```
+
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+
+prediccion_ord <- prediccion_rn01med
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+RMSE_test_rn01med <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rn01med)
+
+```
+
+
+Muestra la importancia de las variables:
+```{r}
+varimp_rn01med <-varImp(modelo_rn01med)
+print(varimp_rn01med)
+
+```
+
+
+Prueba (rn01med20) Redes Neuronales Media 20 mejores caracteristicas: 
+ - Datos normalizados.
+ - Eliminados datos que no varian.
+ - Juego de datos 1
+ - Redes Neuronales (mxnet)
+ - Sensores, desviaciones y medias moviles.
+ - Solo los 20 mas relevantes
+ - Parametros por defecto
+ - Metrica RMSE
+
+
+Dejar solo 20 variables en el fichero de entrenamiento
+```{r}
+# dftrain1mednorvar20 <- dftrain1mednorvar[ , -which(names(dftest1medultnorm) %in% c("unit_num","ope_set1", "ope_set2", "sen1", "sen3", "sen6", "sen8", "sen9", "sen13", "sen14", "med6", "med8", "med9", "med13", "med14", "sd2", "sd3", "sd4", "sd6","sd7", "sd8", "sd9", "sd11","sd12", "sd13", "sd14", "sd15", "sd17", "sd20", "sd21"))]
+
+dftrain1mednorvar20 <- dftrain1mednorvar[ , which(names(dftest1medultnorm) %in% c("med4","time_cycles", "med11", "med15", "med21", "med3", "med20", "med17", "med12", "med7", "med2", "sen11", "sen4", "sen12", "sen7", "sen21", "sen15", "sen20", "sen2", "sen17"))]
+
+
+```
+
+
+Entrenar el modelo
+```{r}
+
+# Valor para la semilla a la hora de generar numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# Entrenar el modelo
+modelo_rn01med20 <- train(
+  x = dftrain1mednorvar20, 
+  y = dftrain1RUL$RUL, 
+  method = "mxnet", 
+  preProc =  NULL 
+  )
+
+```
+
+
+Resultados entrenamiento:
+```{r}
+print(modelo_rn01med20)
+```
+
+Revisar
+Dejar solo 20 variables en test
+```{r}
+# dftest1medultnorvar20 <- dftest1medultnorvar[ , -which(names(dftest1medultnorm) %in% c("unit_num", "ope_set1", "ope_set2", "sen1", "sen3", "sen6", "sen8", "sen9", "sen13", "sen14", "med6", "med8", "med9", "med13", "med14", "sd2", "sd3", "sd4", "sd6", "sd7", "sd8", "sd9", "sd11", "sd12", "sd13", "sd14", "sd15", "sd17", "sd20", "sd21"))]
+
+dftest1medultnorvar20 <- dftest1medultnorvar[ , which(names(dftest1medultnorm) %in% c("med4","time_cycles", "med11", "med15", "med21", "med3", "med20", "med17", "med12", "med7", "med2", "sen11", "sen4", "sen12", "sen7", "sen21", "sen15", "sen20", "sen2", "sen17"))]
+
+```
+
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rn01med20 <- predict(modelo_rn01med20, newdata = dftest1medultnorvar20)
+```
+
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+
+prediccion_ord <- prediccion_rn01med20
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+RMSE_test_rn01med20 <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rn01med20)
+
+```
+
+
+
+Muestra la importancia de las variables:
+```{r}
+varimp_rn01med20 <-varImp(modelo_rn01med20)
+print(varimp_rn01med20)
+```
+
+
+
+prueba01med20parametros01
+
+
+
+Prueba (rn01med20p01) Redes Neuronales Ajuste parametros 
+ - Datos normalizados.
+ - Eliminados datos que no varian.
+ - Juego de datos 1
+ - Redes Neuronales (mxnet)
+ - Sensores, desviaciones y medias moviles.
+ - Solo los 20 mas relevantes
+ - Parametros ajustados
+ - Metrica RMSE
+
+
+```{r}
+# Parametros de Ajuste
+grid_par01 <- expand.grid(
+  layer1 = 5,
+  layer2 = 2,
+  layer3 = 1,
+  learning.rate = 0.000002,
+  momentum = 0.9,
+  dropout = 0,
+  activation = "relu"
+  )
+
+# Valor para la semilla a la hora de generar
+# numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# Entrenar el modelo
+modelo_rn01med20p01 <- train(
+  x = dftrain1mednorvar20, 
+  y = dftrain1RUL$RUL, 
+  method = "mxnet", 
+  preProc =  NULL ,
+  tuneGrid = grid_par01
+  )
+
+```
+
+
+Resultados entrenamiento:
+```{r}
+print(modelo_rn01med20p01)
+```
+
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rn01med20p01 <- predict(modelo_rn01med20p01, newdata = dftest1medultnorvar20)
+```
+
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+
+prediccion_ord <- prediccion_rn01med20p01
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+er_test_rn01med20p01 <- er_test
+RMSE_test_rn01med20p01 <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rn01med20p01)
+
+```
+
+Histograma Error
+```{r}
+dferp01 <- as.data.frame(er_test_rn01med20p01)
+ggplot(data=dferp01, aes(dferp01$er_test_rn01med20p01)) +
+  geom_histogram(binwidth = 10)+
+  labs(title="", x="Error", y="")
+
+```
+
+
+

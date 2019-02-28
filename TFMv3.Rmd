@@ -1,0 +1,730 @@
+---
+title: "Cálculo de vida útil restante en maquinaria mediante técnicas de Inteligencia Artificial Parte 1"
+output: html_notebook
+---
+Autor: Iñigo Rekalde
+Fecha: 28-02-2019
+
+
+Preparación del entorno
+```{r}
+# Fijar el directorio de trabajo
+setwd("~/Personal/Master/TFM/R/Def")
+
+# Instalar las librerias si no están instaladas
+# install.packages("paquete")
+# Cargar librerias
+library(dplyr)
+library(zoo)
+library(ggplot2)
+library(reshape2)
+library(caret)
+```
+
+Preparación para importar
+```{r}
+# Los datos a importar no contienen cabeceras.
+# Se genera un vector con nombres de las columnas. Train y test comparten columnas.
+col_nombres <- c("unit_num","time_cycles","ope_set1","ope_set2","ope_set3",
+              "sen1","sen2","sen3","sen4","sen5","sen6","sen7","sen8","sen9","sen10",
+              "sen11","sen12","sen13","sen14","sen15","sen16","sen17","sen18","sen19","sen20","sen21")
+# Columna de RUL de test
+col_RUL <- c("RUL")
+
+# Para facilitar la importación se establecen los tipos de datos por columna.
+# Las dos primeras son enteros y las restantes son numericas para train y test
+col_tipos <- rep("integer", 2)
+col_tipos <- c(col_tipos, rep("numeric", 24))
+# RUL como númerica
+col_tipo_RUL <- c("numeric")
+```
+
+Importación de los ficheros:
+Datos juego 1 de entrenamiento, test y RUL verdadero Test
+```{r}
+# Se importa el fichero para entrenar los modelos en un data frame
+dftrain1 <- read.table("train_FD001.txt", col.names = col_nombres, colClasses = col_tipos)
+# Se importa el fichero para test o validación en un dataframe
+dftest1 <- read.table("test_FD001.txt", col.names = col_nombres, colClasses = col_tipos)
+# Se importa el fichero con el RUL de test o validación
+dfRUL1 <- read.table("RUL_FD001.txt", col.names = col_RUL, colClasses = col_tipo_RUL)
+```
+
+Fichero de Test 1 solo quedarse con el último registro de cada motor
+```{r}
+dftest1ult <- merge(aggregate(time_cycles~unit_num, dftest1,function(x) x[which.max(x)]),dftest1)
+# Ordenarlo por número de motor
+dftest1ult <- dftest1ult[with(dftest1ult, order(unit_num)), ]
+```
+
+Normalizar Juego de datos 1
+```{r}
+# Generar el modelo de normalizar
+normalizardf1 <- preProcess(dftrain1, method = "range", rangeBounds = c(0,1))
+# No variation for for: ope_set3, sen1, sen5, sen10, sen16, sen18, sen19
+
+# Normalizar el fichero de entrenamiento
+dftrain1norm <- predict(normalizardf1, dftrain1)
+# Normalizar el fichero de test
+dftest1norm <- predict(normalizardf1, dftest1)
+# Normalizar el fichero de test con un único registro por motor
+dftest1ultnorm <- predict(normalizardf1, dftest1ult)
+```
+
+Eliminar las variables que no varian en el juego de entrenamiento
+```{r}
+dftrain1norvar <- dftrain1norm[ , -which(names(dftrain1norm) %in% c("ope_set3", "sen1", "sen5", "sen10", "sen16", "sen18", "sen19"))]
+```
+
+Gráfico Motor 1 Ciclo 1 sin normalizar
+```{r}
+
+gdf <- melt(dftrain1[dftrain1$unit_num == 1, !names(dftrain1) %in% c("unit_num","RUL")], id.vars="time_cycles")
+grafico1 <- ggplot(gdf, aes( x=time_cycles, y=value, colour=variable , group=variable))+  
+  geom_line()+labs(title = "", x = "Ciclos", y = "")+ 
+  theme(plot.title = element_text(hjust = 0.5))+
+  guides(color="none")
+
+grafico1
+
+```
+
+
+Gráfico Motor 1 Ciclo 1 datos normalizados
+```{r}
+dftrain1normgraf <- dftrain1norvar
+dftrain1normgraf$time_cycles <- dftrain1$time_cycles
+
+dftrain1normgraf <- melt(dftrain1normgraf[dftrain1normgraf$unit_num == 0, names(dftrain1normgraf) != "unit_num"],id.vars="time_cycles")
+
+grafico1norm <- ggplot(dftrain1normgraf, aes( x=time_cycles, y=value, colour=variable , group=variable))+  
+  geom_line()+labs(title = "", x = "Ciclos", y = "")+ 
+  theme(plot.title = element_text(hjust = 0.5))+
+  guides(color="none")
+
+grafico1norm
+
+```
+
+
+Agregar al dataframe training 1 vida Util restante (RUL)
+```{r}
+# Se generan la vida Util restante RUL para el fichero de entrenamiento
+
+# Primero se calcula cual es el ultimo ciclo de cada motor
+por_motor <- group_by(dftrain1, unit_num)
+limitemotor <- summarise (por_motor, fin_vida=max(time_cycles))
+
+# se Genera una copia
+dftrain1RUL <- dftrain1
+
+# Se agrega temporalmente una columna con el limite de cada motor
+dftrain1RUL$fin_vida <- limitemotor$fin_vida[match(dftrain1RUL$unit_num, limitemotor$unit_num)]
+
+# Se calcula la vida restante a partir del limite de fin de vida y del ciclo actual
+dftrain1RUL$RUL <- dftrain1RUL$fin_vida - dftrain1RUL$time_cycles
+
+# Se elimina la columna del limite de fin de vida
+dftrain1RUL$fin_vida <- NULL
+```
+
+
+
+Prueba 01a Random Forest Normalización: 
+ - Sin normalizar.
+ - Sin eliminar datos que no varian  
+ - Juego de datos 1
+ - Random Forest
+ - Solo sensores.
+ - 1 parametro.
+ - Metodo: oob
+ - Metrica RMSE
+ - Arboles: 8
+ 
+```{r}
+
+# Parametros de control 
+control01 <- trainControl(
+  method = "oob")
+
+# Valor para la semilla a la hora de generar numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# Generación del modelo
+modelo_rf01 = train(RUL ~ ., data=dftrain1RUL,
+                          method='rf',
+                          preProcess=NULL,
+                          metric = "RMSE",
+                          replace = TRUE,
+                          tuneLength = 1,
+                          ntree = 8,
+                          importance=T,
+                          trControl = control01)
+
+```
+
+Resultados entrenamiento:
+```{r}
+print(modelo_rf01)
+```
+
+
+Muestra la importancia de las variables
+```{r}
+varimp_rf01 <- varImp(modelo_rf01)
+print(varimp_rf01)
+```
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rf01 <- predict(modelo_rf01, newdata = dftest1ult)
+```
+
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+prediccion_ord <- prediccion_rf01[order(as.integer(names(prediccion_rf01)))]
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+RMSE_test_rf01 <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rf01)
+
+```
+
+
+
+Prueba 01b Random Forest Normalización: 
+ - Sin normalizar.
+ - Eliminados datos que no varian  
+ - Juego de datos 1
+ - Random Forest
+ - Solo sensores.
+ - 1 parametro.
+ - Metodo: oob
+ - Metrica RMSE
+ - Arboles: 8
+ 
+```{r}
+# Eliminar las vaariables que no varian
+dftrain1RULvar <- dftrain1RUL[ , -which(names(dftrain1RUL) %in% c("ope_set3", "sen1", "sen5", "sen10", "sen16", "sen18", "sen19"))]
+
+# Parametros de control 
+control01b <- trainControl(
+  method = "oob")
+
+# Valor para la semilla a la hora de generar numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# Generación del modelo
+modelo_rf01b = train(RUL ~ ., data=dftrain1RULvar,
+                          method='rf',
+                          preProcess=NULL,
+                          metric = "RMSE",
+                          replace = TRUE,
+                          tuneLength = 1,
+                          ntree = 8,
+                          importance=T,
+                          trControl = control01b)
+
+```
+
+
+Resultados entrenamiento:
+```{r}
+print(modelo_rf01b)
+```
+
+Muestra la importancia de las variables:
+```{r}
+varimp_rf01b <- varImp(modelo_rf01b)
+print(varimp_rf01b)
+```
+
+
+Eliminar las variables que no varian en el juego de test
+```{r}
+dftest1ultvar <- dftest1ult[ , -which(names(dftest1ult) %in% c("ope_set3", "sen1", "sen5", "sen10", "sen16", "sen18", "sen19"))]
+```
+
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rf01b <- predict(modelo_rf01b, newdata = dftest1ultvar)
+```
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+
+prediccion_ord <- prediccion_rf01b[order(as.integer(names(prediccion_rf01b)))]
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+RMSE_test_rf01b <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rf01b)
+
+```
+
+
+Prueba 01c Random Forest Normalización: 
+ - Datos normalizados.
+ - Sin eliminar datos que no varian  
+ - Juego de datos 1
+ - Random Forest
+ - Solo sensores.
+ - 1 parametro.
+ - Metodo: oob
+ - Metrica RMSE
+ - Arboles: 8
+ 
+```{r}
+# Agregar el tiempor de vida útil restante
+dftrain1normRUL <- dftrain1norm
+dftrain1normRUL$RUL <- dftrain1RUL$RUL
+
+# Parametros de control 
+control01c <- trainControl(
+  method = "oob")
+
+# Valor para la semilla a la hora de generar numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# Generación del modelo
+modelo_rf01c = train(RUL ~ ., data=dftrain1normRUL,
+                          method='rf',
+                          preProcess=NULL,
+                          metric = "RMSE",
+                          replace = TRUE,
+                          tuneLength = 1,
+                          ntree = 8,
+                          importance=T,
+                          trControl = control01c)
+
+```
+
+
+Resultados:
+```{r}
+print(modelo_rf01c)
+```
+
+Muestra la importancia de las variables:
+```{r}
+varimp_rf01c <-varImp(modelo_rf01c)
+print(varimp_rf01c)
+```
+
+
+Normaliza los datos de Test
+```{r}
+dftest1ultnorm <- predict(normalizardf1, dftest1ult)
+```
+
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rf01c <- predict(modelo_rf01c, newdata = dftest1ultnorm)
+```
+
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+
+prediccion_ord <- prediccion_rf01c[order(as.integer(names(prediccion_rf01c)))]
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+RMSE_test_rf01c <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rf01c)
+
+```
+
+
+
+Prueba 01d Random Forest Normalización: 
+ - Datos normalizados.
+ - Eliminados datos que no varian  
+ - Juego de datos 1
+ - Random Forest
+ - Solo sensores.
+ - 1 parametro.
+ - Metodo: oob
+ - Metrica RMSE
+ - Arboles: 8
+ 
+ 
+```{r}
+# Agregar el tiempor de vida útil restante
+dftrain1normRULvar <- dftrain1norvar
+dftrain1normRULvar$RUL <- dftrain1RUL$RUL
+
+# Parametros de control 
+control01d <- trainControl(
+  method = "oob")
+
+# Valor para la semilla a la hora de generar numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# Generación del modelo
+modelo_rf01d = train(RUL ~ ., data=dftrain1normRULvar,
+                          method='rf',
+                          preProcess=NULL,
+                          metric = "RMSE",
+                          replace = TRUE,
+                          tuneLength = 1,
+                          ntree = 8,
+                          importance=T,
+                          trControl = control01d)
+
+```
+
+
+Resultados entrenamiento:
+```{r}
+print(modelo_rf01d)
+```
+
+Muestra la importancia de las variables:
+```{r}
+varimp_rf01d <- varImp(modelo_rf01d)
+print(varimp_rf01d)
+```
+
+
+Eliminar las variables que no varian en el juego de test
+```{r}
+dftest1ultnormvar <- dftest1ultnorm[ , -which(names(dftest1ultnorm) %in% c("ope_set3", "sen1", "sen5", "sen10", "sen16", "sen18", "sen19"))]
+```
+
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rf01d <- predict(modelo_rf01d, newdata = dftest1ultnormvar)
+```
+
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+
+prediccion_ord <- prediccion_rf01d[order(as.integer(names(prediccion_rf01d)))]
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+RMSE_test_rf01d <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rf01d)
+
+```
+
+
+Prueba 01e Random Forest Eliminar id de motor: 
+ - Datos normalizados.
+ - Eliminados datos que no varian.
+ - Eliminado el id del motor
+ - Juego de datos 1
+ - Random Forest
+ - Solo sensores.
+ - 1 parametro.
+ - Metodo: oob
+ - Metrica RMSE
+ - Arboles: 8
+ 
+ 
+```{r}
+# Eliminar el numero de moto unit_num 
+dftrain1normRULvarnum <- dftrain1normRULvar
+dftrain1normRULvarnum$unit_num <- NULL
+
+
+# Parametros de control 
+control01e <- trainControl(
+  method = "oob")
+
+# Valor para la semilla a la hora de generar numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# 
+modelo_rf01e = train(RUL ~ ., data=dftrain1normRULvarnum,
+                          method='rf',
+                          preProcess=NULL,
+                          metric = "RMSE",
+                          replace = TRUE,
+                          tuneLength = 1,
+                          ntree = 8,
+                          importance=T,
+                          trControl = control01e)
+
+```
+
+
+Resultados entrenamiento:
+```{r}
+print(modelo_rf01e)
+```
+
+Muestra la importancia de las variables:
+```{r}
+varimp_rf01e <- varImp(modelo_rf01e)
+print(varimp_rf01e)
+```
+
+
+Eliminar las variables que no varian en el juego de test y el numero de motor
+```{r}
+dftest1ultnormvarnum <- dftest1ultnorm[ , -which(names(dftest1ultnorm) %in% c("unit_num", "ope_set3", "sen1", "sen5", "sen10", "sen16", "sen18", "sen19"))]
+```
+
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rf01e <- predict(modelo_rf01e, newdata = dftest1ultnormvarnum)
+```
+
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+
+prediccion_ord <- prediccion_rf01e[order(as.integer(names(prediccion_rf01e)))]
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+RMSE_test_rf01e <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rf01e)
+
+
+```
+
+
+
+
+
+
+Prueba (rn01b) Redes Neuronales Normalización: 
+ - Datos normalizados.
+ - Eliminados datos que no varian.
+ - Juego de datos 1
+ - Redes Neuronales (mxnet)
+ - Solo sensores.
+ - Parametros por defecto
+ - Metrica RMSE
+
+```{r}
+
+# Valor para la semilla a la hora de generar numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# Entrenar el modelo
+modelo_rn01b <- train(
+  x = dftrain1norvar, 
+  y = dftrain1normRULvar$RUL, 
+  method = "mxnet", 
+  preProc =  NULL
+  )
+
+
+```
+
+
+Resultados entrenamiento:
+```{r}
+print(modelo_rn01b)
+```
+
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rn01b <- predict(modelo_rn01b, newdata = dftest1ultnormvar)
+```
+
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+
+prediccion_ord <- prediccion_rn01b
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+RMSE_test_rn01b <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rn01b)
+
+```
+
+
+Prueba (rn01c) Redes Neuronales Normalización: 
+ - Datos sin normalizar.
+ - No eliminados datos que no varian.
+ - Juego de datos 1
+ - Redes Neuronales (mxnet)
+ - Solo sensores.
+ - Parametros por defecto
+ - Metrica RMSE
+
+```{r}
+
+# Valor para la semilla a la hora de generar numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# Entrenar el modelo
+modelo_rn01c <- train(
+  x = dftrain1, 
+  y = dftrain1RUL$RUL, 
+  method = "mxnet", 
+  preProc =  NULL 
+  )
+
+```
+
+
+Resultados entrenamiento:
+```{r}
+print(modelo_rn01c)
+```
+
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rn01c <- predict(modelo_rn01c, newdata = dftest1ult)
+```
+
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+
+prediccion_ord <- prediccion_rn01c
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+RMSE_test_rn01c <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rn01c)
+
+```
+
+
+Prueba (rn01d) Redes Neuronales Normalización: 
+ - Datos normalizados.
+ - No eliminados datos que no varian.
+ - Juego de datos 1
+ - Redes Neuronales (mxnet)
+ - Solo sensores.
+ - Parametros por defecto
+ - Metrica RMSE
+
+```{r}
+
+# Valor para la semilla a la hora de generar numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# Entrenar el modelo
+modelo_rn01d <- train(
+  x = dftrain1norm, 
+  y = dftrain1normRUL$RUL, 
+  method = "mxnet", 
+  preProc =  NULL
+  )
+
+
+```
+
+
+Resultados entrenamiento:
+```{r}
+print(modelo_rn01d)
+```
+
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rn01d <- predict(modelo_rn01d, newdata = dftest1ultnorm)
+```
+
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+
+prediccion_ord <- prediccion_rn01d
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+RMSE_test_rn01d <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rn01d)
+
+```
+
+
+
+
+Prueba (rn01e) Redes Neuronales Normalización: 
+ - Datos sin normalizar.
+ - Eliminados datos que no varian.
+ - Juego de datos 1
+ - Redes Neuronales (mxnet)
+ - Solo sensores.
+ - Parametros por defecto
+ - Metrica RMSE
+
+
+```{r}
+# Eliminar el RUL
+dftrain1var <- dftrain1RULvar
+dftrain1var$RUL <- NULL
+
+# Valor para la semilla a la hora de generar numeros aleatorios y que tenga repetitibilidad
+set.seed(128)
+
+# Entrenar el modelo
+modelo_rn01e <- train(
+  x = dftrain1var, 
+  y = dftrain1RULvar$RUL, 
+  method = "mxnet", 
+  preProc =  NULL 
+  )
+
+```
+
+
+Resultados entrenamiento:
+```{r}
+print(modelo_rn01e)
+```
+
+
+Genera la predicción del tiempo de vida restante sobre los datos de Test
+```{r}
+prediccion_rn01e <- predict(modelo_rn01e, newdata = dftest1ultvar)
+```
+
+
+Calculo RMSE Test 
+```{r}
+# Calculo RMSE Test
+
+prediccion_ord <- prediccion_rn01e
+
+er_test <- (prediccion_ord - dfRUL1$RUL)
+RMSE_test_rn01e <- sqrt(mean(er_test^2))
+
+print("RMSE datos Test:")
+print(RMSE_test_rn01e)
+
+```
+
+
+
+
+
+
